@@ -1,0 +1,584 @@
+// ==UserScript==
+// @name         GeoFS 3D Missile System with Targeting
+// @namespace    http://tampermonkey.net/
+// @version      1.1
+// @description  Adds a 3D missile system with targeting to GeoFS
+// @author       You
+// @match        https://www.geo-fs.com/*
+// @grant        none
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    let missiles = [];
+    let locking = false;
+    let lockProgress = 0;
+    let lockTarget = null;
+    let crosshairSize = 200;
+    let crosshairCanvas = null;
+    let crosshairCtx = null;
+    let lockInterval = null;
+
+    // Utility: Find nearest enemy (demo: nearest multiplayer aircraft)
+    function findNearestEnemy() {
+        if (!geofs || !geofs.api || !geofs.api.viewer || !geofs.multiplayer || !geofs.multiplayer.visibleUsers) return null;
+        let myPos = geofs.api.viewer.camera.position;
+        let minDist = Infinity;
+        let nearest = null;
+        for (let id in geofs.multiplayer.visibleUsers) {
+            let user = geofs.multiplayer.visibleUsers[id];
+            if (user.isYou) continue;
+            let dist = myPos.distanceTo(new THREE.Vector3(user.coordinates[0], user.coordinates[1], user.coordinates[2]));
+            if (dist < minDist) {
+                minDist = dist;
+                nearest = user;
+            }
+        }
+        return nearest;
+    }
+
+    // Draw crosshair on screen
+    function createCrosshairCanvas() {
+        crosshairCanvas = document.createElement("canvas");
+        crosshairCanvas.width = window.innerWidth;
+        crosshairCanvas.height = window.innerHeight;
+        crosshairCanvas.style.position = "fixed";
+        crosshairCanvas.style.top = "0";
+        crosshairCanvas.style.left = "0";
+        crosshairCanvas.style.pointerEvents = "none";
+        crosshairCanvas.style.zIndex = 10000;
+        document.body.appendChild(crosshairCanvas);
+        crosshairCtx = crosshairCanvas.getContext("2d");
+        window.addEventListener("resize", () => {
+            crosshairCanvas.width = window.innerWidth;
+            crosshairCanvas.height = window.innerHeight;
+        });
+    }
+
+    function drawCrosshair(x, y, size) {
+        crosshairCtx.clearRect(0, 0, crosshairCanvas.width, crosshairCanvas.height);
+        crosshairCtx.strokeStyle = "red";
+        crosshairCtx.lineWidth = 4;
+        crosshairCtx.beginPath();
+        crosshairCtx.moveTo(x - size, y);
+        crosshairCtx.lineTo(x + size, y);
+        crosshairCtx.moveTo(x, y - size);
+        crosshairCtx.lineTo(x, y + size);
+        crosshairCtx.stroke();
+    }
+
+    // Locking logic
+    function startLock() {
+        if (locking) return;
+        lockTarget = findNearestEnemy();
+        if (!lockTarget) return;
+        locking = true;
+        lockProgress = 0;
+        crosshairSize = 200;
+        if (!crosshairCanvas) createCrosshairCanvas();
+        lockInterval = setInterval(lockStep, 50);
+    }
+
+    function lockStep() {
+        if (!locking || !lockTarget) {
+            stopLock();
+            return;
+        }
+        lockProgress += 0.02;
+        crosshairSize = 200 - 180 * lockProgress;
+        // Project enemy position to screen
+        let enemyPos = new THREE.Vector3(lockTarget.coordinates[0], lockTarget.coordinates[1], lockTarget.coordinates[2]);
+        let vector = enemyPos.clone().project(geofs.api.viewer.camera);
+        let x = (vector.x * 0.5 + 0.5) * window.innerWidth;
+        let y = (-vector.y * 0.5 + 0.5) * window.innerHeight;
+        drawCrosshair(x, y, Math.max(20, crosshairSize));
+        if (lockProgress >= 1) {
+            crosshairSize = 20;
+            drawCrosshair(x, y, crosshairSize);
+            stopLock(true);
+        }
+    }
+
+    function stopLock(locked) {
+        locking = false;
+        clearInterval(lockInterval);
+        if (crosshairCtx) crosshairCtx.clearRect(0, 0, crosshairCanvas.width, crosshairCanvas.height);
+        if (locked) {
+            // Ready to fire missile at lockTarget
+            fireMissileAt(lockTarget);
+        }
+        lockTarget = null;
+        lockProgress = 0;
+    }
+
+    // Missile logic
+    function fireMissileAt(target) {
+        if (!target) return;
+        const pos = geofs.api.viewer.camera.position.clone();
+        let targetPos = new THREE.Vector3(target.coordinates[0], target.coordinates[1], target.coordinates[2]);
+        let dir = targetPos.clone().sub(pos).normalize();
+
+        // Create missile mesh
+        const geometry = new THREE.CylinderGeometry(0.2, 0.2, 2, 8);
+        const material = new THREE.MeshBasicMaterial({ color: 0xff0000 });
+        const missile = new THREE.Mesh(geometry, material);
+
+        missile.position.copy(pos);
+        missile.lookAt(targetPos);
+        missile.userData = {
+            velocity: dir.clone().multiplyScalar(1),
+            target: target,
+            targetPos: targetPos
+        };
+
+        geofs.api.viewer.scene.add(missile);
+        missiles.push(missile);
+    }
+
+    // Animate missiles
+    function animateMissiles() {
+        for (let i = missiles.length - 1; i >= 0; i--) {
+            const missile = missiles[i];
+            // Homing: update direction toward target
+            if (missile.userData.target) {
+                let t = missile.userData.target;
+                missile.userData.targetPos = new THREE.Vector3(t.coordinates[0], t.coordinates[1], t.coordinates[2]);
+                let dir = missile.userData.targetPos.clone().sub(missile.position).normalize();
+                missile.userData.velocity.lerp(dir.multiplyScalar(1), 0.1); // smooth turn
+                missile.lookAt(missile.userData.targetPos);
+            }
+            missile.position.add(missile.userData.velocity);
+            // Remove missile if too far
+            if (missile.position.distanceTo(geofs.api.viewer.camera.position) > 5000) {
+                geofs.api.viewer.scene.remove(missile);
+                missiles.splice(i, 1);
+            }
+        }
+        requestAnimationFrame(animateMissiles);
+    }
+
+    // Key handler
+    document.addEventListener("keydown", function(e) {
+        if (e.key.toLowerCase() === "y") {
+            startLock();
+        }
+    });
+
+    animateMissiles();
+})();let readyToFire = false;
+let lockedTarget = null;
+
+// Update stopLock to set readyToFire and lockedTarget
+function stopLock(locked) {
+    locking = false;
+    clearInterval(lockInterval);
+    if (crosshairCtx) crosshairCtx.clearRect(0, 0, crosshairCanvas.width, crosshairCanvas.height);
+    if (locked) {
+        // Set ready to fire
+        readyToFire = true;
+        lockedTarget = lockTarget;
+        // Optionally, show a message or visual indicator
+    } else {
+        readyToFire = false;
+        lockedTarget = null;
+    }
+    lockTarget = null;
+    lockProgress = 0;
+}
+
+// Update fireMissileAt to reset readyToFire and lockedTarget
+function fireMissileAt(target) {
+    if (!target) return;
+    const pos = geofs.api.viewer.camera.position.clone();
+    let targetPos = new THREE.Vector3(target.coordinates[0], target.coordinates[1], target.coordinates[2]);
+    let dir = targetPos.clone().sub(pos).normalize();
+
+    // Create missile mesh
+    const geometry = new THREE.CylinderGeometry(0.2, 0.2, 2, 8);
+    const material = new THREE.MeshBasicMaterial({ color: 0xff0000 });
+    const missile = new THREE.Mesh(geometry, material);
+
+    missile.position.copy(pos);
+    missile.lookAt(targetPos);
+    missile.userData = {
+        velocity: dir.clone().multiplyScalar(1),
+        target: target,
+        targetPos: targetPos
+    };
+
+    geofs.api.viewer.scene.add(missile);
+    missiles.push(missile);
+
+    // Reset fire state
+    readyToFire = false;
+    lockedTarget = null;
+}
+
+// Listen for LMB to fire
+document.addEventListener("mousedown", function(e) {
+    if (e.button === 0 && readyToFire && lockedTarget) {
+        fireMissileAt(lockedTarget);
+    }
+});// List of military aircraft IDs or names (example, adjust as needed)
+const militaryAircraft = [
+    "f16", "f18", "f22", "su27", "mig29", "rafale", "eurofighter"
+];
+
+// Store missile meshes for each aircraft
+let aircraftMissiles = {};
+
+// Helper: Add missiles to an aircraft
+function addMissilesToAircraft(aircraft) {
+    if (!aircraft || !aircraft.model || aircraftMissiles[aircraft.id]) return;
+
+    // Example: Add 2 missiles under each wing
+    let missiles = [];
+    for (let i = -1; i <= 1; i += 2) {
+        const geometry = new THREE.CylinderGeometry(0.08, 0.08, 1.2, 8);
+        const material = new THREE.MeshBasicMaterial({ color: 0xcccccc });
+        const missile = new THREE.Mesh(geometry, material);
+
+        // Position missile under the wing (adjust offsets for each aircraft)
+        missile.position.set(i * 2.2, -0.5, -1.5); // x, y, z offsets
+        missile.rotation.z = Math.PI / 2;
+        aircraft.model.add(missile);
+        missiles.push(missile);
+    }
+    aircraftMissiles[aircraft.id] = missiles;
+}
+
+// Hook into aircraft load/change
+function checkAndAddMissiles() {
+    // For player
+    let ac = geofs.aircraft.instance;
+    if (ac && militaryAircraft.includes(ac.id)) {
+        addMissilesToAircraft(ac);
+    }
+    // For multiplayer (enemies)
+    if (geofs.multiplayer && geofs.multiplayer.visibleUsers) {
+        for (let id in geofs.multiplayer.visibleUsers) {
+            let user = geofs.multiplayer.visibleUsers[id];
+            if (user.aircraft && militaryAircraft.includes(user.aircraft.id)) {
+                addMissilesToAircraft(user.aircraft);
+            }
+        }
+    }
+    setTimeout(checkAndAddMissiles, 2000); // Repeat check
+}
+checkAndAddMissiles();
+
+// When firing, hide/remove missile mesh from aircraft
+function fireMissileAt(target) {
+    if (!target) return;
+    // ...existing code...
+
+    // Remove missile mesh from aircraft (player only in this example)
+    let ac = geofs.aircraft.instance;
+    if (ac && aircraftMissiles[ac.id] && aircraftMissiles[ac.id].length > 0) {
+        let missileMesh = aircraftMissiles[ac.id].shift();
+        if (missileMesh) {
+            ac.model.remove(missileMesh);
+        }
+    }
+    // ...existing code...
+}
+// Listen for aircraft change to show/hide missiles appropriately
+document.addEventListener("aircraftChanged", function() {
+    let ac = geofs.aircraft.instance;
+    // Hide all missiles first
+    for (let id in aircraftMissiles) {
+        if (aircraftMissiles[id]) {
+            aircraftMissiles[id].forEach(missile => {
+                if (missile.parent) missile.parent.remove(missile);
+            });
+        }
+    }
+    // Show missiles for current aircraft if it's military
+    if (ac && militaryAircraft.includes(ac.id) && aircraftMissiles[ac.id]) {
+        aircraftMissiles[ac.id].forEach(missile => {
+            if (!ac.model.children.includes(missile)) {
+                ac.model.add(missile);
+            }
+        });
+    }
+});
+// Listen for aircraft change to show/hide missiles appropriately
+document.addEventListener("aircraftChanged", function() {
+    let ac = geofs.aircraft.instance;
+    // Hide all missiles first
+    for (let id in aircraftMissiles) {
+        if (aircraftMissiles[id]) {
+            aircraftMissiles[id].forEach(missile => {
+                if (missile.parent) missile.parent.remove(missile);
+            });
+        }
+    }
+    // Show missiles for current aircraft if it's military
+    if (ac && militaryAircraft.includes(ac.id) && aircraftMissiles[ac.id]) {
+        aircraftMissiles[ac.id].forEach(missile => {
+            if (!ac.model.children.includes(missile)) {
+                ac.model.add(missile);
+            }
+        });
+    }
+});
+// Add missiles to all visible military aircraft (including multiplayer)
+function updateAllAircraftMissiles() {
+    // Player aircraft
+    let ac = geofs.aircraft.instance;
+    if (ac && militaryAircraft.includes(ac.id)) {
+        addMissilesToAircraft(ac);
+    }
+    // Multiplayer aircraft
+    if (geofs.multiplayer && geofs.multiplayer.visibleUsers) {
+        for (let id in geofs.multiplayer.visibleUsers) {
+            let user = geofs.multiplayer.visibleUsers[id];
+            if (user.aircraft && militaryAircraft.includes(user.aircraft.id)) {
+                addMissilesToAircraft(user.aircraft);
+            }
+        }
+    }
+    setTimeout(updateAllAircraftMissiles, 2000);
+}
+updateAllAircraftMissiles();let flares = [];
+let chaffs = [];
+
+// Deploy a flare
+function deployFlare() {
+    const ac = geofs.aircraft.instance;
+    if (!ac || !ac.model) return;
+    const geometry = new THREE.SphereGeometry(0.3, 8, 8);
+    const material = new THREE.MeshBasicMaterial({ color: 0xffa500, emissive: 0xffa500 });
+    const flare = new THREE.Mesh(geometry, material);
+    // Place flare behind aircraft
+    flare.position.copy(ac.model.position).add(new THREE.Vector3(0, -0.5, -3));
+    flare.userData = {
+        velocity: new THREE.Vector3(
+            (Math.random() - 0.5) * 0.2,
+            -0.1,
+            -1.5 + (Math.random() - 0.5) * 0.2
+        ),
+        life: 100 // frames
+    };
+    geofs.api.viewer.scene.add(flare);
+    flares.push(flare);
+}
+
+// Deploy chaff
+function deployChaff() {
+    const ac = geofs.aircraft.instance;
+    if (!ac || !ac.model) return;
+    const geometry = new THREE.BoxGeometry(0.1, 0.1, 0.5);
+    const material = new THREE.MeshBasicMaterial({ color: 0xcccccc });
+    const chaff = new THREE.Mesh(geometry, material);
+    chaff.position.copy(ac.model.position).add(new THREE.Vector3(0, -0.5, -3));
+    chaff.userData = {
+        velocity: new THREE.Vector3(
+            (Math.random() - 0.5) * 0.5,
+            -0.2,
+            -1.2 + (Math.random() - 0.5) * 0.5
+        ),
+        life: 80 // frames
+    };
+    geofs.api.viewer.scene.add(chaff);
+    chaffs.push(chaff);
+}
+
+// Animate flares and chaffs
+function animateCountermeasures() {
+    // Flares
+    for (let i = flares.length - 1; i >= 0; i--) {
+        const flare = flares[i];
+        flare.position.add(flare.userData.velocity);
+        flare.userData.life--;
+        if (flare.userData.life <= 0) {
+            geofs.api.viewer.scene.remove(flare);
+            flares.splice(i, 1);
+        }
+    }
+    // Chaffs
+    for (let i = chaffs.length - 1; i >= 0; i--) {
+        const chaff = chaffs[i];
+        chaff.position.add(chaff.userData.velocity);
+        chaff.userData.life--;
+        if (chaff.userData.life <= 0) {
+            geofs.api.viewer.scene.remove(chaff);
+            chaffs.splice(i, 1);
+        }
+    }
+    requestAnimationFrame(animateCountermeasures);
+}
+animateCountermeasures();
+
+// Key handler for countermeasures
+document.addEventListener("keydown", function(e) {
+    if (e.key.toLowerCase() === "f") {
+        deployFlare();
+    }
+    if (e.key.toLowerCase() === "c") {
+        deployChaff();
+    }
+});
+
+// Optional: Make missiles ignore target if close to a flare/chaff
+function isNearCountermeasure(missile) {
+    for (let flare of flares) {
+        if (missile.position.distanceTo(flare.position) < 5) {
+            return true;
+        }
+    }
+    for (let chaff of chaffs) {
+        if (missile.position.distanceTo(chaff.position) < 5) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// In your missile animation loop, add:
+function animateMissiles() {
+    for (let i = missiles.length - 1; i >= 0; i--) {
+        const missile = missiles[i];
+        // Countermeasure logic
+        if (isNearCountermeasure(missile)) {
+            // Missile is distracted: fly straight or self-destruct
+            missile.userData.target = null;
+        }
+        // ...existing missile homing and movement code...
+    }
+    requestAnimationFrame(animateMissiles);
+}// Key handler for countermeasures
+document.addEventListener("keydown", function(e) {
+    if (e.key.toLowerCase() === "k") {
+        deployFlare();
+    }
+    if (e.key.toLowerCase() === "l") {
+        deployChaff();
+    }
+});// Missile sounds
+const missileLaunchAudio = new Audio("https://cdn.pixabay.com/audio/2022/07/26/audio_124bfae7d2.mp3"); // Example launch sound
+const missileExplosionAudio = new Audio("https://cdn.pixabay.com/audio/2022/03/15/audio_115b9b1e3e.mp3"); // Example explosion sound
+geofs.api.viewer.scene.add(missile);
+missiles.push(missile);
+
+// Play launch sound
+missileLaunchAudio.currentTime = 0;
+missileLaunchAudio.play();
+if (missile.position.distanceTo(geofs.api.viewer.camera.position) > 5000 || /* add explosion condition here */) {
+    geofs.api.viewer.scene.remove(missile);
+    missiles.splice(i, 1);
+
+    // Play explosion sound
+    missileExplosionAudio.currentTime = 0;
+    missileExplosionAudio.play();
+}
+// ...existing code inside animateMissiles()...
+
+// Example: Track player hits
+let playerHits = 0;
+
+function showHitMessage() {
+    let msg = document.createElement("div");
+    msg.innerText = "You've been hit. One more hit and you're disabled";
+    msg.style.position = "fixed";
+    msg.style.top = "40%";
+    msg.style.left = "50%";
+    msg.style.transform = "translate(-50%, -50%)";
+    msg.style.background = "rgba(200,0,0,0.85)";
+    msg.style.color = "#fff";
+    msg.style.fontSize = "2em";
+    msg.style.padding = "30px 60px";
+    msg.style.borderRadius = "20px";
+    msg.style.zIndex = 99999;
+    document.body.appendChild(msg);
+    setTimeout(() => msg.remove(), 2500);
+}
+
+// In your missile animation loop, add this where you check for missile collision with the player:
+function animateMissiles() {
+    for (let i = missiles.length - 1; i >= 0; i--) {
+        const missile = missiles[i];
+        // Countermeasure logic
+        if (isNearCountermeasure(missile)) {
+            missile.userData.target = null;
+        }
+        // Missile homing and movement...
+        missile.position.add(missile.userData.velocity);
+
+        // Check for hit on player
+        let playerPos = geofs.api.viewer.camera.position;
+        if (missile.position.distanceTo(playerPos) < 3) { // Adjust hit radius as needed
+            geofs.api.viewer.scene.remove(missile);
+            missiles.splice(i, 1);
+
+            // Play explosion sound
+            missileExplosionAudio.currentTime = 0;
+            missileExplosionAudio.play();
+
+            // Show hit message
+            playerHits++;
+            if (playerHits === 1) {
+                showHitMessage();
+            } else if (playerHits >= 2) {
+                // You can add a "disabled" message or effect here
+                let msg = document.createElement("div");
+                msg.innerText = "You are disabled!";
+                msg.style.position = "fixed";
+                msg.style.top = "40%";
+                msg.style.left = "50%";
+                msg.style.transform = "translate(-50%, -50%)";
+                msg.style.background = "rgba(80,0,0,0.95)";
+                msg.style.color = "#fff";
+                msg.style.fontSize = "2em";
+                msg.style.padding = "30px 60px";
+                msg.style.borderRadius = "20px";
+                msg.style.zIndex = 99999;
+                document.body.appendChild(msg);
+                setTimeout(() => msg.remove(), 3000);
+                // Optionally, disable controls or trigger other effects here
+            }
+            continue;
+        }
+
+        // Remove missile if too far
+        if (missile.position.distanceTo(geofs.api.viewer.camera.position) > 5000) {
+            geofs.api.viewer.scene.remove(missile);
+            missiles.splice(i, 1);
+
+            // Play explosion sound
+            missileExplosionAudio.currentTime = 0;
+            missileExplosionAudio.play();
+        }
+    }
+    requestAnimationFrame(animateMissiles);
+}// Add this inside your fireMissileAt function, after creating the missile mesh:
+
+// Create missile mesh
+const geometry = new THREE.CylinderGeometry(0.2, 0.2, 2, 8);
+const material = new THREE.MeshBasicMaterial({ color: 0xff0000 });
+const missile = new THREE.Mesh(geometry, material);
+
+// Missile light (bright point light at the rear)
+const missileLight = new THREE.PointLight(0xffa500, 2, 20); // orange, intensity, distance
+missileLight.position.set(0, 0, -1); // Place at the rear of the missile
+missile.add(missileLight); // Attach to missile so it moves with it
+
+missile.position.copy(pos);
+missile.lookAt(targetPos);
+missile.userData = {
+    velocity: dir.clone().multiplyScalar(1),
+    target: target,
+    targetPos: targetPos,
+    light: missileLight // Store reference for cleanup if needed
+};
+
+geofs.api.viewer.scene.add(missile);
+missiles.push(missile);
+
+// ...existing code...
+
+// In your missile removal logic (when removing missile from scene), also remove the light if needed:
+geofs.api.viewer.scene.remove(missile);
+// No need to explicitly remove the light, as it's a child of the missile mesh and will be garbage collected.
+
